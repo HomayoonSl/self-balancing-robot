@@ -1,0 +1,13 @@
+[build]
+target = "thumbv7m-none-eabi"
+
+[target.thumbv7m-none-eabi]
+runner = "probe-rs run --chip STM32F103C8 --protocol swd"
+rustflags = [
+    "-C", "link-arg=-Tlink.x",
+    "-C", "no-vectorize-loops",
+]
+
+[alias]
+r = "run --release"
+b = "build --release"

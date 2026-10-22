@@ -1,0 +1,129 @@
+=== Diagnostics ===
+  rows: 12000   phases present: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+  I2C errors (st=0xFF): 0  (0.00 %)
+  angle errors (0xFFFF): 0  (0.00 %)
+  median dt = 10.0 ms (fs ≈ 100.0 Hz)
+  inter-phase gaps: 0
+
+=== Phase 0: REST baseline ===
+  brake: n= 150 ω_mean=+0.000 ω_std=0.000 rad/s (noise floor)
+  coast: n= 150 ω_mean=+0.000 ω_std=0.000 rad/s (noise floor)
+
+=== Phase 3: Dynamic step response ===
+  +0.5V: no motion
+  +0.8V : ω_ss=-36.025 rad/s, t_rise(10-90%)=  170 ms, τ≈77 ms
+  −0.6V : ω_ss=+27.548 rad/s, t_rise(10-90%)=  140 ms, τ≈64 ms
+
+=== Phase 4: Log-stair with coast (friction) ===
+  ---- steady-state at end of drive ----
+  pass=0 lvl= 0 cmd=  +100 mV  ω= +0.002
+  pass=0 lvl= 1 cmd=  +160 mV  ω= -0.000
+  pass=0 lvl= 2 cmd=  +250 mV  ω= +0.000
+  pass=0 lvl= 3 cmd=  +400 mV  ω= -1.680
+  pass=0 lvl= 4 cmd=  +630 mV  ω= -4.245
+  pass=0 lvl= 5 cmd= +1000 mV  ω= -7.576
+  pass=0 lvl= 6 cmd= +1600 mV  ω=-12.639
+  pass=0 lvl= 7 cmd= +2500 mV  ω=-20.752
+  pass=0 lvl= 8 cmd= +4000 mV  ω=-33.100
+  pass=0 lvl= 9 cmd= +5000 mV  ω=-39.982
+  pass=1 lvl= 0 cmd=  -100 mV  ω= -0.000
+  pass=1 lvl= 1 cmd=  -160 mV  ω= -0.005
+  pass=1 lvl= 2 cmd=  -250 mV  ω= +0.000
+  pass=1 lvl= 3 cmd=  -400 mV  ω= +0.000
+  pass=1 lvl= 4 cmd=  -630 mV  ω= +3.924
+  pass=1 lvl= 5 cmd= -1000 mV  ω= +7.720
+  pass=1 lvl= 6 cmd= -1600 mV  ω=+12.375
+  pass=1 lvl= 7 cmd= -2500 mV  ω=+20.618
+  pass=1 lvl= 8 cmd= -4000 mV  ω=+33.163
+  pass=1 lvl= 9 cmd= -5000 mV  ω=+40.061
+  log-stair fit: |ω|=+8.342·|V|-0.867 R²=0.9983
+
+  ---- coast decay fits (viscous + Coulomb) ----
+  pass=0 lvl= 3: τb=   34 ms sign=-1 R²=0.955
+  pass=0 lvl= 4: τb=  128 ms sign=-1 R²=0.914
+  pass=0 lvl= 5: τb=  668 ms sign=-1 R²=0.924
+  pass=0 lvl= 6: τb= 1379 ms sign=-1 R²=0.933
+  pass=0 lvl= 7: τb= 1489 ms sign=-1 R²=0.966
+  pass=0 lvl= 8: τb= 2401 ms sign=-1 R²=0.900
+  pass=0 lvl= 9: τb= 1334 ms sign=-1 R²=0.868
+  pass=1 lvl= 4: τb=   99 ms sign=+1 R²=0.960
+  pass=1 lvl= 5: τb=  462 ms sign=+1 R²=0.981
+  pass=1 lvl= 6: τb=  530 ms sign=+1 R²=0.941
+  pass=1 lvl= 7: τb= 1598 ms sign=+1 R²=0.932
+  pass=1 lvl= 8: τb=  853 ms sign=+1 R²=0.909
+  pass=1 lvl= 9: τb=  974 ms sign=+1 R²=0.855
+  median τb over 13 coasts: 853 ms  (range 34–2401)
+
+=== Phase 5: Chirp — frequency response ===
+  effective fs = 100.0 Hz, n = 2000
+  Kv (low-f plateau) ≈ 1.81 rad/s/V
+  f_-3dB ≈ 4.00 Hz → τ_eff ≈ 40 ms
+  phase at 0.5 Hz ≈ 152.0°
+  coherence > 0.8 over 3 bins of 6 valid
+
+=== Phase 6: Doublet — initial acceleration ===
+  rep=0 pulse=0: cmd= +800 mV, dω/dt=-6.1 rad/s²
+  rep=0 pulse=1: cmd= +800 mV, dω/dt=-49.1 rad/s²
+  rep=1 pulse=0: cmd= +800 mV, dω/dt=-43.7 rad/s²
+  rep=1 pulse=1: cmd= +800 mV, dω/dt=-51.4 rad/s²
+  rep=2 pulse=0: cmd= +800 mV, dω/dt=-31.4 rad/s²
+  rep=2 pulse=1: cmd= +800 mV, dω/dt=-7.7 rad/s²
+  rep=3 pulse=0: cmd= +800 mV, dω/dt=-4.6 rad/s²
+  rep=3 pulse=1: cmd= +800 mV, dω/dt=-10.0 rad/s²
+  rep=4 pulse=0: cmd= +800 mV, dω/dt=-1.5 rad/s²
+  rep=4 pulse=1: cmd= +800 mV, dω/dt=-46.0 rad/s²
+  median dω/dt = -20.7 rad/s²
+  (if Kt known: J ≈ Kt·I / dω/dt, with I = cmd/R_motor)
+
+=== Phase 7: Coast-down friction ===
+  sub=1: τb=578 ms, R²=0.971, kind=plateau, sign=-1
+  sub=3: τb=557 ms, R²=0.969, kind=plateau, sign=+1
+
+=== Phase 8: Final brake (safety) ===
+
+=== Phases 1+2: Fine staircase (deadzone + Kv) ===
+   ph lvl  cmd_mV      ω_ss   Vbat
+    1   0     100    +0.000   5.55
+    1   1     150    +0.000   5.55
+    1   2     200    +0.000   5.55
+    1   3     250    +0.000   5.55
+    1   4     300    +0.000   5.54
+    1   5     400    +0.000   5.55
+    1   6     500    +0.000   5.54
+    1   7     650    -4.016   5.54
+    1   8     800    -5.364   5.54
+    1   9    1000    -7.447   5.54
+    1  10    1250    -9.451   5.54
+    1  11    1500   -11.717   5.54
+    1  12    2000   -16.235   5.53
+    1  13    3000   -24.737   5.52
+    2   0    -100    +0.001   5.55
+    2   1    -150    +0.001   5.55
+    2   2    -200    +0.000   5.55
+    2   3    -250    +0.000   5.55
+    2   4    -300    +0.003   5.55
+    2   5    -400    -0.001   5.54
+    2   6    -500    +2.775   5.54
+    2   7    -650    +4.437   5.54
+    2   8    -800    +5.735   5.54
+    2   9   -1000    +7.445   5.54
+    2  10   -1250    +9.723   5.54
+    2  11   -1500   +11.859   5.54
+    2  12   -2000   +15.987   5.53
+    2  13   -3000   +24.785   5.52
+
+  |ω| = +8.748·|V| -1.408  R²=0.9995
+  Kv       ≈ +8.75 rad/s/V  (~83.5 RPM/V)
+  deadzone ≈ 161 mV
+  first motion +V: level=7 cmd=650 mV → ω=-4.02 rad/s
+  first motion −V: level=6 cmd=-500 mV → ω=+2.78 rad/s
+  asymmetry (FWD − |REV|) across 14 levels: mean=-0.270 rad/s, max=2.775
+
+=== Global summary ===
+  Kv    ≈ +8.75 rad/s/V
+  deadzone ≈ 161 mV
+  ⚠ chirp coherence low — increase chirp amplitude or reduce sample period
+
+  → for the model equation ω = Kv·V − b, feed Kv and
+    deadzone into the controller's feed-forward path.
+    Feed τ from phase 3/7 into the observer time constant.

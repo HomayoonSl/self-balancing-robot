@@ -1,5 +1,5 @@
 *.hex
-*.csv
 *.bin
 /target/
 **/*.rs.bk
+research.md

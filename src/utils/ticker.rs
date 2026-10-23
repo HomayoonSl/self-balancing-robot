@@ -12,12 +12,15 @@ impl Ticker {
             period,
         }
     }
-
     pub fn wait(&mut self) -> bool {
-        let diff = DWT::cycle_count().wrapping_sub(self.next) as i32;
-        let late = diff > 0;
-        while (DWT::cycle_count().wrapping_sub(self.next) as i32) < 0 {}
-        self.next = self.next.wrapping_add(self.period);
-        late
+    let diff = DWT::cycle_count().wrapping_sub(self.next) as i32;
+    let late = diff > self.period as i32;
+    if late {
+        // Prevent catch-up bursts: resynchronize to current time
+        self.next = DWT::cycle_count();
+    }
+    while (DWT::cycle_count().wrapping_sub(self.next) as i32) < 0 {}
+    self.next = self.next.wrapping_add(self.period);
+    late
     }
 }

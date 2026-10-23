@@ -52,11 +52,11 @@ const RAD_PER_COUNT: f32 = 6.283_185_3 / 4096.0;
 const KP_ACC: f32 = 0.5;
 const KI_BIAS: f32 = 0.0625;
 
-// Restored aggressive state feedback gains
-const K_THETA: f32 = 40.0;
+// Baseline verified gains
+const K_THETA: f32 = 33.0;
 const K_RATE: f32 = 2.8;
-const K_WHEEL: f32 = 0.85;
-const K_WHEEL_RATE: f32 = 0.55;
+const K_WHEEL: f32 = 0.73;
+const K_WHEEL_RATE: f32 = 0.49;
 const DZ_POS_V: f32 = 0.40;
 const DZ_NEG_V: f32 = 0.30;
 const DZ_SOFT_V: f32 = 0.60;
@@ -111,7 +111,7 @@ fn vbat_avg(read_adc: &mut impl FnMut() -> u16, n: u32) -> f32 {
     avg_raw * ADC_TO_V
 }
 
-// Queue
+// In-memory circular buffer with automatic overwrite
 struct LogQueue<const N: usize> {
     buf: [Rec; N],
     head: usize,
@@ -128,10 +128,10 @@ impl<const N: usize> LogQueue<N> {
     }
 
     fn push(&mut self, r: Rec) {
-        let next = (self.head + 1) % N;
-        if next != self.tail {
-            self.buf[self.head] = r;
-            self.head = next;
+        self.buf[self.head] = r;
+        self.head = (self.head + 1) % N;
+        if self.head == self.tail {
+            self.tail = (self.tail + 1) % N;
         }
     }
 
@@ -155,15 +155,13 @@ fn main() -> ! {
     cp.DCB.enable_trace();
     cp.DWT.enable_cycle_counter();
 
-    // Safe, guaranteed startup using internal 8 MHz HSI oscillator
     let mut rcc = dp.RCC.constrain();
-
     let mut afio = dp.AFIO.constrain(&mut rcc);
     let mut gpioa = dp.GPIOA.split(&mut rcc);
     let mut gpiob = dp.GPIOB.split(&mut rcc);
     let mut gpioc = dp.GPIOC.split(&mut rcc);
 
-    // Indicators and Push Button
+    // Indicator LEDs and Button
     let mut pc13 = gpioc.pc13.into_push_pull_output(&mut gpioc.crh);
     let mut pa3 = gpioa.pa3.into_push_pull_output(&mut gpioa.crl);
     let mut pa2 = gpioa.pa2.into_push_pull_output(&mut gpioa.crl);
@@ -173,13 +171,12 @@ fn main() -> ! {
     let mut ready_led = |on: bool| drive(&mut pa3, on == LED_ACTIVE_HIGH);
     let mut log_led = |on: bool| drive(&mut pa2, on);
 
-    // Initial state: LEDs OFF
+    // Initial state: LEDs off
     status_led(false);
     ready_led(false);
     log_led(false);
 
-    // ---------------------------------------------------------------- Visual Self-Test
-    // Flash all 3 LEDs immediately for 300ms to visually verify power and pin connections
+    // Visual self-test: flash all LEDs for 300 ms on power-up
     status_led(true);
     ready_led(true);
     log_led(true);
@@ -210,13 +207,13 @@ fn main() -> ! {
     let mut set1 = |d: u16| ch_in1.set_duty(d);
     let mut set2 = |d: u16| ch_in2.set_duty(d);
 
-    // ADC setup
+    // Battery ADC channel
     let mut adc1 = adc::Adc::new(dp.ADC1, &mut rcc);
     adc1.set_sample_time(adc::SampleTime::T_239);
     let mut ch0 = gpioa.pa0.into_analog(&mut gpioa.crl);
     let mut read_adc = || -> u16 { adc1.read(&mut ch0).unwrap_or(0) };
 
-    // Bit-banged I2C interfaces
+    // Bit-banged I2C buses with DWT timing
     let scl1 = gpiob.pb6.into_open_drain_output(&mut gpiob.crl);
     let sda1 = gpiob.pb7.into_open_drain_output(&mut gpiob.crl);
     let scl2 = gpiob.pb10.into_open_drain_output(&mut gpiob.crh);
@@ -307,22 +304,10 @@ fn main() -> ! {
     }
     ready_led(false);
 
-    // Initialize SD card logging session
-    if logger.open_session().is_err() {
-        // SD card mount error indicator: alternating blink
-        loop {
-            status_led(true);
-            log_led(false);
-            delay_ms(300);
-            status_led(false);
-            log_led(true);
-            delay_ms(300);
-        }
-    }
+    // Initialize SD session: failures do not block the robot from balancing
+    let sd_ok = logger.open_session().is_ok();
+    log_led(sd_ok);
 
-    // Armed state: log_led (PA2) is ON
-    log_led(true);
-    
     let cyc_per_us = CPU_HZ / 1_000_000;
     let mut raw = read_raw_angle(&mut enc, AS_ADDR, I2C_HALF_US).unwrap_or(0);
     let mut filt = Filter::new(
@@ -349,7 +334,6 @@ fn main() -> ! {
 
     let mut tk = Ticker::new(DT_US * cyc_per_us);
     let mut n: u32 = 0;
-    let mut logged_rows: u32 = 0;
     let mut run_cnt = 0u32;
     let mut queue = LogQueue::<FIFO_LEN>::new();
     let mut engaged = false;
@@ -357,7 +341,7 @@ fn main() -> ! {
     let mut theta = 0.0f32;
     let mut rate = 0.0f32;
 
-    // Main real-time balancing and logging loop
+    // Main real-time balancing loop (strictly zero blocking I/O)
     loop {
         tk.wait();
         n += 1;
@@ -373,19 +357,20 @@ fn main() -> ! {
             rate = ra;
         }
 
-        // Stop conditions: Push button pressed
+        // Stop on button press
         if is_button_pressed(&mut btn) {
             break;
         }
 
-        // Grace period: Wait until robot is held upright (< 9.7 deg) for at least 200ms before engaging motors
+        // Grace period: Hold upright (< 9.7 deg) for 1 second to allow filter to converge
         if !engaged {
             set1(0);
             set2(0);
             if theta.abs() < 0.17 {
                 engage_timer += 1;
-                if engage_timer >= 40 {
+                if engage_timer >= 200 {
                     engaged = true;
+                    ready_led(true); // Signal to release the robot now
                     wheel = Wheel::new(raw, ENC_SIGN, RAD_PER_COUNT, DT);
                 }
             } else {
@@ -394,7 +379,7 @@ fn main() -> ! {
             continue;
         }
 
-        // Active balancing phase: Stop conditions
+        // Active Balancing Phase: Safety cutoff conditions
         if theta.abs() > FALL_RAD {
             break;
         }
@@ -411,6 +396,7 @@ fn main() -> ! {
         let v = deadzone_comp(v_lin, DZ_POS_V, DZ_NEG_V, DZ_SOFT_V).clamp(-V_LIMIT_V, V_LIMIT_V);
         apply_cmd(&mut set1, &mut set2, max_duty, (v * 1000.0) as i32, (vbat * 1000.0) as u32, SLOW_DECAY);
 
+        // Store to RAM buffer only: zero-overhead, deterministic execution
         let rec = Rec {
             pitch_cd: (theta * 5729.578) as i16,
             rate_dd: (rate * 572.958) as i16,
@@ -418,34 +404,34 @@ fn main() -> ! {
             wheel_rate_cr: (wrate * 100.0) as i16,
             v_mv: (v * 1000.0) as i16,
         };
-
         queue.push(rec);
-
-        if let Some(item) = queue.pop() {
-            let _ = logger.log_record(logged_rows, &item);
-            logged_rows += 1;
-        }
 
         if n % 10 == 0 {
             let vm = read_adc() as f32 * ADC_TO_V;
             vbat += 0.3 * (vm - vbat);
         }
     }
-    
-    // Disarm motors immediately
+
+    // Immediate actuator shutdown
     set1(0);
     set2(0);
     drive(&mut nsleep, false);
+    ready_led(false);
     log_led(false);
 
-    // Flush remaining records to SD card and close FAT session cleanly
-    while let Some(item) = queue.pop() {
-        let _ = logger.log_record(logged_rows, &item);
-        logged_rows += 1;
+    // Flush RAM buffer to MicroSD only after complete stop
+    if sd_ok {
+        status_led(true);
+        let mut logged_rows: u32 = 0;
+        while let Some(item) = queue.pop() {
+            let _ = logger.log_record(logged_rows, &item);
+            logged_rows += 1;
+        }
+        logger.close_session();
+        status_led(false);
     }
-    logger.close_session();
 
-    // Signal safe power-off state with fast blinking on status LED (PC13)
+    // Signal safe power-down state (fast blinking)
     loop {
         status_led(true);
         delay_ms(80);

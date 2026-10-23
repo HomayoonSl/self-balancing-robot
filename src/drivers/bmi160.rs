@@ -12,14 +12,14 @@ pub fn bmi_init<SCL: Line, SDA: Line>(bus: &mut BitI2c<SCL, SDA>, bmi_addr: u8, 
     }
     let mut ok = true;
     ok &= bus.write_regs(bmi_addr, 0x7E, &[0x11], half_us).is_ok();
-    cortex_m::asm::delay(4_800_000);
+    cortex_m::asm::delay(80_000); // 10 ms at 8 MHz
     ok &= bus.write_regs(bmi_addr, 0x7E, &[0x15], half_us).is_ok();
-    cortex_m::asm::delay(48_000_000);
+    cortex_m::asm::delay(800_000); // 100 ms at 8 MHz
     ok &= bus.write_regs(bmi_addr, 0x40, &[0x2B], half_us).is_ok();
     ok &= bus.write_regs(bmi_addr, 0x41, &[0x03], half_us).is_ok();
     ok &= bus.write_regs(bmi_addr, 0x42, &[0x2B], half_us).is_ok();
     ok &= bus.write_regs(bmi_addr, 0x43, &[0x01], half_us).is_ok();
-    cortex_m::asm::delay(9_600_000);
+    cortex_m::asm::delay(160_000); // 20 ms at 8 MHz
     ok && bus.read_reg(bmi_addr, 0x03, half_us) == Ok(0x14)
 }
 

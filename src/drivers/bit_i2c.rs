@@ -32,23 +32,23 @@ impl<SCL: Line, SDA: Line> BitI2c<SCL, SDA> {
 
     pub fn start(&mut self, _half_us: u32) -> Result<(), I2cError> {
         Self::drive_pin(&mut self.sda, true);
-        cortex_m::asm::delay(_half_us * 8); 
+        cortex_m::asm::delay(_half_us * 48); 
         self.scl_high(_half_us)?;
-        cortex_m::asm::delay(_half_us * 8);
+        cortex_m::asm::delay(_half_us * 48);
         Self::drive_pin(&mut self.sda, false);
-        cortex_m::asm::delay(_half_us * 8);
+        cortex_m::asm::delay(_half_us * 48);
         Self::drive_pin(&mut self.scl, false);
-        cortex_m::asm::delay(_half_us * 8);
+        cortex_m::asm::delay(_half_us * 48);
         Ok(())
     }
 
     pub fn stop(&mut self, _half_us: u32) -> Result<(), I2cError> {
         Self::drive_pin(&mut self.sda, false);
-        cortex_m::asm::delay(_half_us * 8);
+        cortex_m::asm::delay(_half_us * 48);
         self.scl_high(_half_us)?;
-        cortex_m::asm::delay(_half_us * 8);
+        cortex_m::asm::delay(_half_us * 48);
         Self::drive_pin(&mut self.sda, true);
-        cortex_m::asm::delay(_half_us * 8);
+        cortex_m::asm::delay(_half_us * 48);
         Ok(())
     }
 
@@ -59,7 +59,7 @@ impl<SCL: Line, SDA: Line> BitI2c<SCL, SDA> {
             if waited_us >= 2000 {
                 return Err(I2cError::SclStuckLow);
             }
-            cortex_m::asm::delay(80);
+            cortex_m::asm::delay(480);
             waited_us += 10;
         }
         Ok(())
@@ -68,19 +68,19 @@ impl<SCL: Line, SDA: Line> BitI2c<SCL, SDA> {
     pub fn write_byte(&mut self, b: u8, _half_us: u32) -> Result<bool, I2cError> {
         for i in (0..8).rev() {
             Self::drive_pin(&mut self.sda, (b >> i) & 1 == 1);
-            cortex_m::asm::delay(_half_us * 8);
+            cortex_m::asm::delay(_half_us * 48);
             self.scl_high(_half_us)?;
-            cortex_m::asm::delay(_half_us * 8);
+            cortex_m::asm::delay(_half_us * 48);
             Self::drive_pin(&mut self.scl, false);
-            cortex_m::asm::delay(_half_us * 8);
+            cortex_m::asm::delay(_half_us * 48);
         }
         Self::drive_pin(&mut self.sda, true);
-        cortex_m::asm::delay(_half_us * 8);
+        cortex_m::asm::delay(_half_us * 48);
         self.scl_high(_half_us)?;
-        cortex_m::asm::delay(_half_us * 8);
+        cortex_m::asm::delay(_half_us * 48);
         let ack = !Self::level_pin(&mut self.sda);
         Self::drive_pin(&mut self.scl, false);
-        cortex_m::asm::delay(_half_us * 8);
+        cortex_m::asm::delay(_half_us * 48);
         Ok(ack)
     }
 
@@ -88,19 +88,19 @@ impl<SCL: Line, SDA: Line> BitI2c<SCL, SDA> {
         Self::drive_pin(&mut self.sda, true);
         let mut v = 0u8;
         for _ in 0..8 {
-            cortex_m::asm::delay(_half_us * 8);
+            cortex_m::asm::delay(_half_us * 48);
             self.scl_high(_half_us)?;
-            cortex_m::asm::delay(_half_us * 8);
+            cortex_m::asm::delay(_half_us * 48);
             v = (v << 1) | (Self::level_pin(&mut self.sda) as u8);
             Self::drive_pin(&mut self.scl, false);
-            cortex_m::asm::delay(_half_us * 8);
+            cortex_m::asm::delay(_half_us * 48);
         }
         Self::drive_pin(&mut self.sda, !ack);
-        cortex_m::asm::delay(_half_us * 8);
+        cortex_m::asm::delay(_half_us * 48);
         self.scl_high(_half_us)?;
-        cortex_m::asm::delay(_half_us * 8);
+        cortex_m::asm::delay(_half_us * 48);
         Self::drive_pin(&mut self.scl, false);
-        cortex_m::asm::delay(_half_us * 8);
+        cortex_m::asm::delay(_half_us * 48);
         Self::drive_pin(&mut self.sda, true);
         Ok(v)
     }

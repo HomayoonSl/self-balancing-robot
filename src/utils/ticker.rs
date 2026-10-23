@@ -14,7 +14,8 @@ impl Ticker {
     }
 
     pub fn wait(&mut self) -> bool {
-        let late = (DWT::cycle_count().wrapping_sub(self.next) as i32) > (self.period as i32);
+        let diff = DWT::cycle_count().wrapping_sub(self.next) as i32;
+        let late = diff > 0;
         while (DWT::cycle_count().wrapping_sub(self.next) as i32) < 0 {}
         self.next = self.next.wrapping_add(self.period);
         late

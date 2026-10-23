@@ -1,78 +1,93 @@
 use embedded_hal::spi::SpiDevice;
 use embedded_hal::delay::DelayNs;
-use embedded_sdmmc::{TimeSource, Timestamp, VolumeManager, Mode, SdCard, VolumeIdx};
+use embedded_sdmmc::{TimeSource, Timestamp, VolumeManager, Mode, SdCard, VolumeIdx, RawFile, RawDirectory, RawVolume};
+use crate::utils::blackbox::Rec;
 
 pub struct DummyTimeSource;
 
 impl TimeSource for DummyTimeSource {
     fn get_timestamp(&self) -> Timestamp {
         Timestamp {
-            year_since_1970: 54,
-            zero_indexed_month: 0,
-            zero_indexed_day: 0,
-            hours: 0,
+            year_since_1970: 56,
+            zero_indexed_month: 9,
+            zero_indexed_day: 23,
+            hours: 12,
             minutes: 0,
             seconds: 0,
         }
     }
 }
 
-pub struct SdLogger<DEV, DELAY, const N: usize> {
-    spi_dev: DEV,
-    delay: DELAY,
-    _marker: core::marker::PhantomData<[(); N]>,
+pub struct StreamLogger<DEV, DELAY>
+where
+    DEV: SpiDevice<u8>,
+    DELAY: DelayNs,
+{
+    volume_mgr: VolumeManager<SdCard<DEV, DELAY>, DummyTimeSource>,
+    volume: Option<RawVolume>,
+    root_dir: Option<RawDirectory>,
+    file: Option<RawFile>,
 }
 
-impl<DEV, DELAY, const N: usize> SdLogger<DEV, DELAY, N>
+impl<DEV, DELAY> StreamLogger<DEV, DELAY>
 where
     DEV: SpiDevice<u8>,
     DELAY: DelayNs,
 {
     pub fn new(spi_dev: DEV, delay: DELAY) -> Self {
+        let sdcard = SdCard::new(spi_dev, delay);
+        let volume_mgr = VolumeManager::new(sdcard, DummyTimeSource);
         Self {
-            spi_dev,
-            delay,
-            _marker: core::marker::PhantomData,
+            volume_mgr,
+            volume: None,
+            root_dir: None,
+            file: None,
         }
     }
 
-    pub fn dump_blackbox(
-        &mut self,
-        bb: &crate::utils::BlackBox<N>,
-        dt_ms: u32,
-    ) -> Result<(), &'static str> {
-        let sdcard = SdCard::new(&mut self.spi_dev, &mut self.delay);
-        let volume_mgr = VolumeManager::new(sdcard, DummyTimeSource);
-
-        let volume = volume_mgr
-            .open_volume(VolumeIdx(0))
-            .map_err(|_| "VolumeInitFailed")?;
-            
-        let root_dir = volume
-            .open_root_dir()
-            .map_err(|_| "OpenRootDirFailed")?;
-
-        let file = root_dir
-            .open_file_in_dir("log.csv", Mode::ReadWriteCreateOrTruncate)
-            .map_err(|_| "FileOpenFailed")?;
+    pub fn open_session(&mut self) -> Result<(), &'static str> {
+        let volume = self.volume_mgr.open_raw_volume(VolumeIdx(0)).map_err(|_| "VolOpen")?;
+        let root_dir = self.volume_mgr.open_root_dir(volume).map_err(|_| "DirOpen")?;
+        let file = self.volume_mgr.open_file_in_dir(
+            root_dir,
+            "log.csv",
+            Mode::ReadWriteCreateOrTruncate,
+        ).map_err(|_| "FileCreate")?;
 
         let header = b"row,pitch_cdeg,rate_ddps,wheel_crad,wheel_rate_crad_s,v_mv\r\n";
-        file.write(header).map_err(|_| "WriteFailed")?;
+        self.volume_mgr.write(file, header).map_err(|_| "HeaderWrite")?;
 
-        let start = (bb.head + N - bb.filled) % N;
-        for i in 0..bb.filled {
-            let r = bb.buf[(start + i) % N];
-            let mut buf = [0u8; 64];
-            let len = format_row(i, r, dt_ms, &mut buf);
-            file.write(&buf[..len]).map_err(|_| "WriteFailed")?;
-        }
-
-        file.close().map_err(|_| "CloseFailed")?;
+        self.volume = Some(volume);
+        self.root_dir = Some(root_dir);
+        self.file = Some(file);
         Ok(())
+    }
+
+    pub fn log_record(&mut self, row_idx: u32, r: &Rec) -> Result<(), &'static str> {
+        if let Some(file) = self.file {
+            let mut buf = [0u8; 64];
+            let len = format_row(row_idx, *r, &mut buf);
+            self.volume_mgr.write(file, &buf[..len]).map_err(|_| "RowWrite")?;
+            Ok(())
+        } else {
+            Err("FileNotOpen")
+        }
+    }
+
+    pub fn close_session(&mut self) {
+        if let Some(file) = self.file.take() {
+            let _ = self.volume_mgr.close_file(file);
+        }
+        if let Some(dir) = self.root_dir.take() {
+            let _ = self.volume_mgr.close_dir(dir);
+        }
+        if let Some(vol) = self.volume.take() {
+            let _ = self.volume_mgr.close_volume(vol);
+        }
     }
 }
 
-fn format_row(i: usize, r: crate::utils::blackbox::Rec, _dt_ms: u32, buf: &mut [u8]) -> usize {
+fn format_row(i: u32, r: Rec, buf: &mut [u8]) -> usize {
     use core::fmt::Write;
     struct BufWriter<'a> {
         buf: &'a mut [u8],

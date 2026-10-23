@@ -6,16 +6,14 @@ mod control;
 mod drivers;
 mod utils;
 
-use core::fmt::Write;
-
 use cortex_m::peripheral::SCB;
 use cortex_m_rt::entry;
 use embedded_hal::digital::{InputPin, OutputPin};
 use stm32f1xx_hal::{adc, pac, prelude::*, timer::Timer};
 
-use control::{apply_cmd, cal_fail_text, calibrate, deadzone_comp, Filter, Wheel};
-use drivers::{bmi_init, read_imu, read_raw_angle, BitI2c, Uart};
-use utils::{BlackBox, Rec, Ticker};
+use control::{apply_cmd, calibrate, deadzone_comp, Filter, Wheel};
+use drivers::{bmi_init, read_imu, read_raw_angle, BitI2c};
+use utils::{Rec, StreamLogger, Ticker};
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
@@ -25,21 +23,13 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 
 // ================================================================ Configuration
 
-const CPU_HZ: u32 = 8_000_000;
-const BAUD: u32 = 57_600;
-const BIT_CYCLES: u32 = CPU_HZ / BAUD;
+const CPU_HZ: u32 = 48_000_000;
 const I2C_HALF_US: u32 = 3;
 const AS_ADDR: u8 = 0x36;
 const BMI_ADDR: u8 = 0x69;
 const PWM_HZ: u32 = 20_000;
 const SLOW_DECAY: bool = true;
 const LED_ACTIVE_HIGH: bool = true;
-
-//const BENCH_MODE: bool = false;
-//const BENCH_DRIVE: bool = false;
-//const BENCH_V_MAX: f32 = 2.5;
-//const BENCH_VBAT_MV: u32 = 5500;
-const DUMP_ON_STOP: bool = true;
 
 const DT_US: u32 = 5000;
 const DT_MS: u32 = 5;
@@ -51,7 +41,6 @@ const ACC_FWD_AXIS: usize = 0;
 const ACC_FWD_SIGN: f32 = 1.0;
 const GYRO_FLIP: bool = false;
 const GYRO_PITCH_AXIS: usize = 3 - ACC_UP_AXIS - ACC_FWD_AXIS;
-const _: () = assert!(ACC_UP_AXIS < 3 && ACC_FWD_AXIS < 3 && ACC_UP_AXIS != ACC_FWD_AXIS);
 
 const ACC_LSB_PER_G: f32 = 16384.0;
 const GYRO_LSB_PER_DPS: f32 = 32.8;
@@ -81,10 +70,10 @@ const RUNAWAY_RATE: f32 = 40.0;
 const RUNAWAY_TICKS: u32 = 60;
 const WHEEL_LIMIT_RAD: f32 = 70.0;
 const VBAT_MIN_V: f32 = 4.8;
-
-//const VDDA_MV: u32 = 3300;
 const ADC_TO_V: f32 = (3.3 / 4095.0) * 4.0;
-const BB_LEN: usize = 400;
+
+// ظرفیت بافر حلقوی رم برای جذب تاخیرهای احتمالی کارت SD (حدود ۲.۵ ثانیه)
+const FIFO_LEN: usize = 512;
 
 // ================================================================ Helpers
 
@@ -122,202 +111,39 @@ fn vbat_avg(read_adc: &mut impl FnMut() -> u16, n: u32) -> f32 {
     avg_raw * ADC_TO_V
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Outcome {
-    Fell,
-    Runaway,
-    Travel,
-    Sensor,
-    Fault,
-    Battery,
+// بافر صف حلقوی
+struct LogQueue<const N: usize> {
+    buf: [Rec; N],
+    head: usize,
+    tail: usize,
 }
 
-impl Outcome {
-    fn name(self) -> &'static str {
-        match self {
-            Outcome::Fell => "pitch limit",
-            Outcome::Runaway => "wheel speed runaway",
-            Outcome::Travel => "wheel travel limit",
-            Outcome::Sensor => "sensor read failures",
-            Outcome::Fault => "DRV8833 nFAULT",
-            Outcome::Battery => "battery below minimum",
+impl<const N: usize> LogQueue<N> {
+    const fn new() -> Self {
+        Self {
+            buf: [utils::blackbox::REC_ZERO; N],
+            head: 0,
+            tail: 0,
         }
     }
-}
 
-struct RunStats {
-    outcome: Outcome,
-    engaged_ticks: u32,
-    overruns: u32,
-    max_busy_us: u32,
-    max_pitch_cd: i32,
-}
-
-// ================================================================ Control Routine
-
-#[allow(clippy::too_many_arguments)]
-fn run_balance<S1, D1, S2, D2, S, F>(
-    imu: &mut BitI2c<S1, D1>,
-    enc: &mut BitI2c<S2, D2>,
-    nsleep: &mut S,
-    nfault: &mut F,
-    set1: &mut impl FnMut(u16),
-    set2: &mut impl FnMut(u16),
-    read_adc: &mut impl FnMut() -> u16,
-    max_duty: u16,
-    cal: &control::Calib,
-    bb: &mut BlackBox<BB_LEN>,
-) -> RunStats
-where
-    S1: drivers::Line,
-    D1: drivers::Line,
-    S2: drivers::Line,
-    D2: drivers::Line,
-    S: OutputPin,
-    F: InputPin,
-{
-    let cyc_per_us = CPU_HZ / 1_000_000;
-    let mut stats = RunStats {
-        outcome: Outcome::Fell,
-        engaged_ticks: 0,
-        overruns: 0,
-        max_busy_us: 0,
-        max_pitch_cd: 0,
-    };
-
-    let mut raw = match read_raw_angle(enc, AS_ADDR, I2C_HALF_US) {
-        Some(r) => r,
-        None => {
-            stats.outcome = Outcome::Sensor;
-            return stats;
+    fn push(&mut self, r: Rec) {
+        let next = (self.head + 1) % N;
+        if next != self.tail {
+            self.buf[self.head] = r;
+            self.head = next;
         }
-    };
+    }
 
-    let mut filt = Filter::new(
-        cal,
-        gyro_sign(),
-        KP_ACC,
-        KI_BIAS,
-        DT,
-        GYRO_RAD_PER_LSB,
-        ACC_UP_SIGN,
-        ACC_LSB_PER_G,
-        ACC_FWD_SIGN,
-        GYRO_PITCH_AXIS,
-        ACC_UP_AXIS,
-        ACC_FWD_AXIS,
-    );
-    let mut wheel = Wheel::new(raw, ENC_SIGN, RAD_PER_COUNT, DT);
-    let mut vbat = vbat_avg(read_adc, 8);
-
-    set1(0);
-    set2(0);
-    drive(nsleep, true);
-    delay_ms(5);
-
-    let mut tk = Ticker::new(DT_US * cyc_per_us);
-    let mut n: u32 = 0;
-    let mut engaged = false;
-    let (mut theta, mut rate) = (0.0f32, 0.0f32);
-    let mut imu_err = 0u32;
-    let mut enc_err = 0u32;
-    let mut run_cnt = 0u32;
-
-    let outcome = loop {
-        if tk.wait() {
-            stats.overruns += 1;
+    fn pop(&mut self) -> Option<Rec> {
+        if self.head == self.tail {
+            None
+        } else {
+            let r = self.buf[self.tail];
+            self.tail = (self.tail + 1) % N;
+            Some(r)
         }
-        let t_in = cortex_m::peripheral::DWT::cycle_count();
-        n += 1;
-
-        match read_raw_angle(enc, AS_ADDR, I2C_HALF_US) {
-            Some(r) => {
-                raw = r;
-                enc_err = 0;
-            }
-            None => enc_err += 1,
-        }
-        let (mut wang, mut wrate) = wheel.update(raw);
-        match read_imu(imu, BMI_ADDR, I2C_HALF_US) {
-            Some(s) => {
-                imu_err = 0;
-                let (th, ra) = filt.update(&s);
-                theta = th;
-                rate = ra;
-            }
-            None => imu_err += 1,
-        }
-        if imu_err > 3 || enc_err > 3 {
-            break Outcome::Sensor;
-        }
-
-        if !engaged && n * DT_MS >= RELEASE_DELAY_MS {
-            if theta.abs() < ENGAGE_RAD {
-                engaged = true;
-                wheel = Wheel::new(raw, ENC_SIGN, RAD_PER_COUNT, DT);
-                wang = 0.0;
-                wrate = 0.0;
-            } else if theta.abs() > FALL_RAD {
-                break Outcome::Fell;
-            }
-        }
-
-        if engaged {
-            stats.engaged_ticks += 1;
-            if theta.abs() > FALL_RAD {
-                break Outcome::Fell;
-            }
-            if wrate.abs() > RUNAWAY_RATE {
-                run_cnt += 1;
-            } else {
-                run_cnt = 0;
-            }
-            if run_cnt > RUNAWAY_TICKS {
-                break Outcome::Runaway;
-            }
-            if wang.abs() > WHEEL_LIMIT_RAD {
-                break Outcome::Travel;
-            }
-            if !level(nfault) {
-                break Outcome::Fault;
-            }
-            if vbat < VBAT_MIN_V {
-                break Outcome::Battery;
-            }
-
-            let v_lin = K_THETA * theta + K_RATE * rate + K_WHEEL * wang + K_WHEEL_RATE * wrate;
-            let v = deadzone_comp(v_lin, DZ_POS_V, DZ_NEG_V, DZ_SOFT_V).clamp(-V_LIMIT_V, V_LIMIT_V);
-            apply_cmd(set1, set2, max_duty, (v * 1000.0) as i32, (vbat * 1000.0) as u32, SLOW_DECAY);
-
-            let pitch_cd = theta * 5729.578;
-            let pa = pitch_cd.abs() as i32;
-            if pa > stats.max_pitch_cd {
-                stats.max_pitch_cd = pa;
-            }
-            bb.push(Rec {
-                pitch_cd: pitch_cd as i16,
-                rate_dd: (rate * 572.958) as i16,
-                wheel_cr: (wang * 100.0) as i16,
-                wheel_rate_cr: (wrate * 100.0) as i16,
-                v_mv: (v * 1000.0) as i16,
-            });
-        }
-
-        if n % 10 == 0 {
-            let vm = read_adc() as f32 * ADC_TO_V;
-            vbat += 0.3 * (vm - vbat);
-        }
-        let busy = cortex_m::peripheral::DWT::cycle_count().wrapping_sub(t_in) / cyc_per_us;
-        if busy > stats.max_busy_us {
-            stats.max_busy_us = busy;
-        }
-    };
-
-    set1(0);
-    set2(0);
-    drive(nsleep, false);
-    stats.outcome = outcome;
-    stats
+    }
 }
 
 // ================================================================ Entry Point
@@ -329,7 +155,16 @@ fn main() -> ! {
     cp.DCB.enable_trace();
     cp.DWT.enable_cycle_counter();
 
-    let mut rcc = dp.RCC.constrain();
+    let mut flash = dp.FLASH.constrain();
+
+    // Configure 48 MHz SYSCLK from 8 MHz HSE crystal in stm32f1xx-hal 0.11.0
+    let mut rcc = dp.RCC.freeze(
+        stm32f1xx_hal::rcc::Config::hse(8.MHz())
+            .sysclk(48.MHz())
+            .pclk1(24.MHz()),
+        &mut flash.acr,
+    );
+    let clocks = rcc.clocks;
     let mut afio = dp.AFIO.constrain(&mut rcc);
     let mut gpioa = dp.GPIOA.split(&mut rcc);
     let mut gpiob = dp.GPIOB.split(&mut rcc);
@@ -345,9 +180,6 @@ fn main() -> ! {
     let mut nsleep = gpiob.pb0.into_push_pull_output(&mut gpiob.crl);
     drive(&mut nsleep, false);
     let mut nfault = gpiob.pb1.into_floating_input(&mut gpiob.crl);
-
-    let mut tx = gpioa.pa9.into_push_pull_output(&mut gpioa.crh);
-    drive(&mut tx, true);
 
     let pa6 = gpioa.pa6.into_alternate_push_pull(&mut gpioa.crl);
     let pa7 = gpioa.pa7.into_alternate_push_pull(&mut gpioa.crl);
@@ -379,6 +211,7 @@ fn main() -> ! {
     let mut sd_cs = gpiob.pb12.into_push_pull_output(&mut gpiob.crh);
     sd_cs.set_high();
 
+    // فرکانس SPI روی ۶ مگاهرتز برای نوشتن سریع روی کارت SD
     let spi2 = stm32f1xx_hal::spi::Spi::new(
         dp.SPI2,
         (Some(sck), Some(miso), Some(mosi)),
@@ -386,20 +219,15 @@ fn main() -> ! {
             polarity: stm32f1xx_hal::spi::Polarity::IdleLow,
             phase: stm32f1xx_hal::spi::Phase::CaptureOnFirstTransition,
         },
-        400.kHz(),
+        6.MHz(),
         &mut rcc,
     );
 
-    let delay = cp.SYST.delay(&rcc.clocks);
+    let delay = cp.SYST.delay(&clocks);
     let spi_device = embedded_hal_bus::spi::ExclusiveDevice::new_no_delay(spi2, sd_cs).unwrap();
-    let mut sd_logger = utils::SdLogger::<_, _, BB_LEN>::new(spi_device, delay);
-
-    delay_ms(100);
-    let mut con = Uart::new(tx, BIT_CYCLES);
-    let _ = write!(con, "\r\n# === Modular Self-balancing controller v1 ===\r\n");
+    let mut logger = StreamLogger::new(spi_device, delay);
 
     if !bmi_init(&mut imu, BMI_ADDR, I2C_HALF_US) {
-        let _ = con.write_str("# BMI160 init failed\r\n");
         loop {
             status_led(true);
             delay_ms(100);
@@ -407,19 +235,17 @@ fn main() -> ! {
             delay_ms(100);
         }
     }
-    let _ = con.write_str("# BMI160 configured\r\n");
-    let vb0 = vbat_avg(&mut read_adc, 16);
-    let _ = write!(con, "# VBAT {:.3} V\r\n", vb0);
-    let mut bb = BlackBox::<BB_LEN>::new();
-    loop {
-        let _ = con.write_str("# hold the robot upright and still\r\n");
-        for i in 0..(BOOT_WAIT_MS / 250) {
-            status_led(i % 2 == 0);
-            delay_ms(250);
-        }
-        status_led(false);
 
-        let cal = match calibrate(
+    // چشمک‌زن اولیه انتظار برای استقرار ربات
+    for i in 0..(BOOT_WAIT_MS / 250) {
+        status_led(i % 2 == 0);
+        delay_ms(250);
+    }
+    status_led(false);
+
+    // کالیبراسیون اولیه سنسورها
+    let cal = loop {
+        match calibrate(
             &mut imu,
             BMI_ADDR,
             I2C_HALF_US,
@@ -436,59 +262,150 @@ fn main() -> ! {
             gyro_sign(),
             GYRO_RAD_PER_LSB,
         ) {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = write!(con, "# calibration failed: {}\r\n", cal_fail_text(e));
-                for _ in 0..10 {
+            Ok(c) => break c,
+            Err(_) => {
+                for _ in 0..6 {
                     status_led(true);
-                    delay_ms(100);
+                    delay_ms(80);
                     status_led(false);
-                    delay_ms(100);
-                }
-                continue;
-            }
-        };
-
-        ready_led(true);
-        let _ = write!(con, "# READY: release the robot within {} ms\r\n", RELEASE_DELAY_MS);
-        let stats = run_balance(
-            &mut imu,
-            &mut enc,
-            &mut nsleep,
-            &mut nfault,
-            &mut set1,
-            &mut set2,
-            &mut read_adc,
-            max_duty,
-            &cal,
-            &mut bb,
-        );
-        ready_led(false);
-
-        let _ = write!(
-            con,
-            "# stop: {} | engaged {} ms | overruns {} | max loop {} us | max pitch {} cdeg\r\n",
-            stats.outcome.name(),
-            stats.engaged_ticks * DT_MS,
-            stats.overruns,
-            stats.max_busy_us,
-            stats.max_pitch_cd
-        );
-        
-        if DUMP_ON_STOP && stats.engaged_ticks > 0 {
-            bb.dump(&mut con, DT_MS);
-
-            let _ = con.write_str("# dumping logs to MicroSD...\r\n");
-            match sd_logger.dump_blackbox(&bb, DT_MS) {
-                Ok(_) => {
-                    let _ = con.write_str("# SD write successful\r\n");
-                }
-                Err(e) => {
-                    let _ = write!(con, "# SD write failed: {}\r\n", e);
+                    delay_ms(80);
                 }
             }
         }
-        bb = BlackBox::new();
-        delay_ms(1000);
+    };
+
+    // ایجاد فایل CSV روی کارت حافظه پیش از شروع کنترل
+    if logger.open_session().is_err() {
+        loop {
+            status_led(true);
+            delay_ms(500);
+            status_led(false);
+            delay_ms(500);
+        }
+    }
+
+    ready_led(true);
+
+    let cyc_per_us = CPU_HZ / 1_000_000;
+    let mut raw = read_raw_angle(&mut enc, AS_ADDR, I2C_HALF_US).unwrap_or(0);
+    let mut filt = Filter::new(
+        &cal,
+        gyro_sign(),
+        KP_ACC,
+        KI_BIAS,
+        DT,
+        GYRO_RAD_PER_LSB,
+        ACC_UP_SIGN,
+        ACC_LSB_PER_G,
+        ACC_FWD_SIGN,
+        GYRO_PITCH_AXIS,
+        ACC_UP_AXIS,
+        ACC_FWD_AXIS,
+    );
+    let mut wheel = Wheel::new(raw, ENC_SIGN, RAD_PER_COUNT, DT);
+    let mut vbat = vbat_avg(&mut read_adc, 8);
+
+    set1(0);
+    set2(0);
+    drive(&mut nsleep, true);
+    delay_ms(5);
+
+    let mut tk = Ticker::new(DT_US * cyc_per_us);
+    let mut n: u32 = 0;
+    let mut logged_rows: u32 = 0;
+    let mut engaged = false;
+    let (mut theta, mut rate) = (0.0f32, 0.0f32);
+    let mut run_cnt = 0u32;
+    let mut queue = LogQueue::<FIFO_LEN>::new();
+
+    // حلقه اصلی تعادل و ثبت داده
+    loop {
+        tk.wait();
+        n += 1;
+
+        if let Some(r) = read_raw_angle(&mut enc, AS_ADDR, I2C_HALF_US) {
+            raw = r;
+        }
+        let (mut wang, mut wrate) = wheel.update(raw);
+
+        if let Some(s) = read_imu(&mut imu, BMI_ADDR, I2C_HALF_US) {
+            let (th, ra) = filt.update(&s);
+            theta = th;
+            rate = ra;
+        }
+
+        // بررسی شرط ورود اولیه به تعادل
+        if !engaged && n * DT_MS >= RELEASE_DELAY_MS {
+            if theta.abs() < ENGAGE_RAD {
+                engaged = true;
+                wheel = Wheel::new(raw, ENC_SIGN, RAD_PER_COUNT, DT);
+                wang = 0.0;
+                wrate = 0.0;
+            } else if theta.abs() > FALL_RAD {
+                break;
+            }
+        }
+
+        if engaged {
+            // شرط پایان: افتادن یا برداشتن ربات از روی زمین (Runaway چرخ‌ها)
+            if theta.abs() > FALL_RAD {
+                break;
+            }
+            if wrate.abs() > RUNAWAY_RATE {
+                run_cnt += 1;
+            } else {
+                run_cnt = 0;
+            }
+            if run_cnt > RUNAWAY_TICKS || wang.abs() > WHEEL_LIMIT_RAD || !level(&mut nfault) || vbat < VBAT_MIN_V {
+                break;
+            }
+
+            let v_lin = K_THETA * theta + K_RATE * rate + K_WHEEL * wang + K_WHEEL_RATE * wrate;
+            let v = deadzone_comp(v_lin, DZ_POS_V, DZ_NEG_V, DZ_SOFT_V).clamp(-V_LIMIT_V, V_LIMIT_V);
+            apply_cmd(&mut set1, &mut set2, max_duty, (v * 1000.0) as i32, (vbat * 1000.0) as u32, SLOW_DECAY);
+
+            let pitch_cd = (theta * 5729.578) as i16;
+            let rec = Rec {
+                pitch_cd,
+                rate_dd: (rate * 572.958) as i16,
+                wheel_cr: (wang * 100.0) as i16,
+                wheel_rate_cr: (wrate * 100.0) as i16,
+                v_mv: (v * 1000.0) as i16,
+            };
+
+            queue.push(rec);
+
+            // در صورتی که داده‌ای در صف باشد، به صورت پیوسته روی فایل SD ریخته می‌شود
+            if let Some(item) = queue.pop() {
+                let _ = logger.log_record(logged_rows, &item);
+                logged_rows += 1;
+            }
+        }
+
+        if n % 10 == 0 {
+            let vm = read_adc() as f32 * ADC_TO_V;
+            vbat += 0.3 * (vm - vbat);
+        }
+    }
+
+    // متوقف کردن آنی موتورها
+    set1(0);
+    set2(0);
+    drive(&mut nsleep, false);
+    ready_led(false);
+
+    // تخلیه داده‌های باقیمانده در صف رم و بستن نهایی فایل روی کارت SD
+    while let Some(item) = queue.pop() {
+        let _ = logger.log_record(logged_rows, &item);
+        logged_rows += 1;
+    }
+    logger.close_session();
+
+    // علامت پایان ایمن: چشمک‌زن سریع ممتد به معنی اتمام نوشتن و امکان قطع تغذیه
+    loop {
+        status_led(true);
+        delay_ms(80);
+        status_led(false);
+        delay_ms(80);
     }
 }

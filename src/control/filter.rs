@@ -14,14 +14,6 @@ pub enum CalFail {
     Axis,
 }
 
-pub fn cal_fail_text(e: CalFail) -> &'static str {
-    match e {
-        CalFail::Read => "IMU read failed",
-        CalFail::Moving => "robot not still (gyro peak-to-peak above limit)",
-        CalFail::Axis => "gravity not on the configured up axis, or tilt above about 23 deg",
-    }
-}
-
 pub fn calibrate<SCL: Line, SDA: Line>(
     imu: &mut BitI2c<SCL, SDA>,
     bmi_addr: u8,
